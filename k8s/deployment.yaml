@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-uploader-deployment
+  labels:
+    app: video-uploader-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: video-uploader-service
+  template:
+    metadata:
+      labels:
+        app: video-uploader-service
+    spec:
+      containers:
+        - name: video-uploader-service
+          image: your-docker-registry/video-uploader-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: video-uploader-config
+                  key: aws.region
+            - name: AWS_S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: video-uploader-config
+                  key: aws.s3.bucket
+            - name: AWS_SQS_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: video-uploader-config
+                  key: aws.sqs.queueUrl
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: accessKeyId
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: secretKey
+            # Endpoints opcionais para LocalStack
+            - name: AWS_S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: video-uploader-config
+                  key: aws.s3.endpoint
+                  optional: true
+            - name: AWS_SQS_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: video-uploader-config
+                  key: aws.sqs.endpoint
+                  optional: true
+
+
