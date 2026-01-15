@@ -33,10 +33,7 @@ public class AwsConfig {
     @Value("${aws.region}")
     private String region;
 
-    /**
-     * Endpoint opcional (por exemplo, LocalStack).
-     * Se não for definido, usa o endpoint padrão da AWS.
-     */
+
     @Value("${aws.s3.endpoint:}")
     private String s3Endpoint;
 
@@ -84,16 +81,10 @@ public class AwsConfig {
         return new ObjectMapper();
     }
 
-    /**
-     * Cria as credenciais AWS. Se sessionToken estiver presente, usa BasicSessionCredentials
-     * (para credenciais temporárias), caso contrário usa BasicAWSCredentials.
-     */
     private AWSCredentials createCredentials() {
-        // Verifica se sessionToken está presente e não está vazio
         boolean hasSessionToken = sessionToken != null && !sessionToken.trim().isEmpty();
 
         if (hasSessionToken) {
-            // Remove espaços em branco do token se houver
             String cleanToken = sessionToken.trim();
             logger.info("Usando credenciais temporárias com session token (tamanho: {} caracteres)", cleanToken.length());
             return new BasicSessionCredentials(accessKeyId, secretKey, cleanToken);

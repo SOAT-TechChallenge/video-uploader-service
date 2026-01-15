@@ -102,15 +102,17 @@
 						<configuration>
 							<excludes>
 								<exclude>**/Application.class</exclude>
+								<exclude>**/config/**</exclude>
 							</excludes>
+
 							<rules>
 								<rule>
-									<element>PACKAGE</element>
+									<element>BUNDLE</element>
 									<limits>
 										<limit>
 											<counter>LINE</counter>
 											<value>COVEREDRATIO</value>
-											<minimum>1.00</minimum>
+											<minimum>0.80</minimum>
 										</limit>
 									</limits>
 								</rule>

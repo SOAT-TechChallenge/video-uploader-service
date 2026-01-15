@@ -1,7 +1,11 @@
 package com.videoUploaderService.config;
 
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.auth.BasicSessionCredentials;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.sqs.AmazonSQS;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -9,148 +13,115 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class AwsConfigTest {
 
-    @Test
-    void amazonS3Bean_Created_WithoutCustomEndpoint() {
-        // Arrange
+    private AwsConfig createBaseConfig() {
         AwsConfig config = new AwsConfig();
         ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
         ReflectionTestUtils.setField(config, "secretKey", "test-secret");
-        ReflectionTestUtils.setField(config, "sessionToken", "");
         ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", "");
-        ReflectionTestUtils.setField(config, "sqsEndpoint", "");
+        return config;
+    }
 
-        // Act
+    // =========================
+    // AMAZON S3
+    // =========================
+
+    @Test
+    void amazonS3_withoutEndpoint_andWithoutSessionToken() {
+        AwsConfig config = createBaseConfig();
+        ReflectionTestUtils.setField(config, "sessionToken", "");
+        ReflectionTestUtils.setField(config, "s3Endpoint", "");
+
         AmazonS3 s3 = config.amazonS3();
 
-        // Assert
         assertNotNull(s3);
     }
 
     @Test
-    void amazonSQSBean_Created_WithoutCustomEndpoint() {
-        // Arrange
-        AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
+    void amazonS3_withEndpoint() {
+        AwsConfig config = createBaseConfig();
         ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", "");
+        ReflectionTestUtils.setField(config, "s3Endpoint", "http://localhost:4566");
+
+        AmazonS3 s3 = config.amazonS3();
+
+        assertNotNull(s3);
+    }
+
+    @Test
+    void amazonS3_withBlankEndpoint() {
+        AwsConfig config = createBaseConfig();
+        ReflectionTestUtils.setField(config, "sessionToken", "");
+        ReflectionTestUtils.setField(config, "s3Endpoint", "   ");
+
+        AmazonS3 s3 = config.amazonS3();
+
+        assertNotNull(s3);
+    }
+
+    // =========================
+    // AMAZON SQS
+    // =========================
+
+    @Test
+    void amazonSQS_withoutEndpoint() {
+        AwsConfig config = createBaseConfig();
+        ReflectionTestUtils.setField(config, "sessionToken", "");
         ReflectionTestUtils.setField(config, "sqsEndpoint", "");
 
-        // Act
         AmazonSQS sqs = config.amazonSQS();
 
-        // Assert
         assertNotNull(sqs);
     }
 
     @Test
-    void amazonS3Bean_Created_WithCustomEndpoint() {
-        // Arrange
-        AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
+    void amazonSQS_withEndpoint() {
+        AwsConfig config = createBaseConfig();
         ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", "http://localhost:4566");
-        ReflectionTestUtils.setField(config, "sqsEndpoint", "");
-
-        // Act
-        AmazonS3 s3 = config.amazonS3();
-
-        // Assert
-        assertNotNull(s3);
-    }
-
-    @Test
-    void amazonSQSBean_Created_WithCustomEndpoint() {
-        // Arrange
-        AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
-        ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", "");
         ReflectionTestUtils.setField(config, "sqsEndpoint", "http://localhost:4566");
 
-        // Act
         AmazonSQS sqs = config.amazonSQS();
 
-        // Assert
         assertNotNull(sqs);
     }
 
+    // =========================
+    // OBJECT MAPPER
+    // =========================
+
     @Test
-    void amazonS3Bean_Created_WithBlankEndpoint() {
-        // Arrange
+    void objectMapperBean_created() {
         AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
+
+        ObjectMapper mapper = config.objectMapper();
+
+        assertNotNull(mapper);
+    }
+
+    // =========================
+    // CREDENTIALS
+    // =========================
+
+    @Test
+    void createCredentials_withoutSessionToken_usesBasicCredentials() {
+        AwsConfig config = createBaseConfig();
         ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", "   ");
-        ReflectionTestUtils.setField(config, "sqsEndpoint", "   ");
 
-        // Act
-        AmazonS3 s3 = config.amazonS3();
+        AWSCredentials credentials =
+                (AWSCredentials) ReflectionTestUtils.invokeMethod(config, "createCredentials");
 
-        // Assert
-        assertNotNull(s3);
+        assertNotNull(credentials);
+        assertTrue(credentials instanceof BasicAWSCredentials);
     }
 
     @Test
-    void amazonSQSBean_Created_WithBlankEndpoint() {
-        // Arrange
-        AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
-        ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", "");
-        ReflectionTestUtils.setField(config, "sqsEndpoint", "   ");
+    void createCredentials_withSessionToken_usesSessionCredentials() {
+        AwsConfig config = createBaseConfig();
+        ReflectionTestUtils.setField(config, "sessionToken", "  session-token-test  ");
 
-        // Act
-        AmazonSQS sqs = config.amazonSQS();
+        AWSCredentials credentials =
+                (AWSCredentials) ReflectionTestUtils.invokeMethod(config, "createCredentials");
 
-        // Assert
-        assertNotNull(sqs);
-    }
-
-    @Test
-    void amazonS3Bean_Created_WithNullEndpoint() {
-        // Arrange
-        AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
-        ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", null);
-        ReflectionTestUtils.setField(config, "sqsEndpoint", null);
-
-        // Act
-        AmazonS3 s3 = config.amazonS3();
-
-        // Assert
-        assertNotNull(s3);
-    }
-
-    @Test
-    void amazonSQSBean_Created_WithNullEndpoint() {
-        // Arrange
-        AwsConfig config = new AwsConfig();
-        ReflectionTestUtils.setField(config, "accessKeyId", "test-key");
-        ReflectionTestUtils.setField(config, "secretKey", "test-secret");
-        ReflectionTestUtils.setField(config, "sessionToken", "");
-        ReflectionTestUtils.setField(config, "region", "us-east-1");
-        ReflectionTestUtils.setField(config, "s3Endpoint", null);
-        ReflectionTestUtils.setField(config, "sqsEndpoint", null);
-
-        // Act
-        AmazonSQS sqs = config.amazonSQS();
-
-        // Assert
-        assertNotNull(sqs);
+        assertNotNull(credentials);
+        assertTrue(credentials instanceof BasicSessionCredentials);
     }
 }
-

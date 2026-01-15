@@ -9,9 +9,7 @@ import org.springframework.core.env.MapPropertySource;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Inicializador que carrega variáveis do arquivo .env antes do Spring Boot inicializar
- */
+
 public class DotenvPropertySourceInitializer implements ApplicationContextInitializer<ConfigurableApplicationContext> {
 
     @Override
@@ -31,7 +29,7 @@ public class DotenvPropertySourceInitializer implements ApplicationContextInitia
             MapPropertySource dotenvPropertySource = new MapPropertySource("dotenv", envMap);
             environment.getPropertySources().addFirst(dotenvPropertySource);
         } catch (Exception e) {
-            // Arquivo .env não encontrado, usar variáveis de ambiente do sistema
+
         }
     }
 }
