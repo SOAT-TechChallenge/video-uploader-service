@@ -6,20 +6,25 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.23"
+    }
   }
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region = var.aws_region
 }
 
-# -----------------------
-# VPC E SUBNETS (DEFAULT)
-# -----------------------
+data "aws_caller_identity" "current" {}
+
+# Data source para a VPC default
 data "aws_vpc" "default" {
   default = true
 }
 
+# Listar todas as subnets da VPC default
 data "aws_subnets" "all" {
   filter {
     name   = "vpc-id"
@@ -27,26 +32,67 @@ data "aws_subnets" "all" {
   }
 }
 
-# -----------------------
-# IAM ROLE (LAB)
-# -----------------------
-data "aws_iam_role" "lab_role" {
-  name = "LabRole"
+# Data source para obter detalhes de cada subnet
+data "aws_subnet" "details" {
+  for_each = toset(data.aws_subnets.all.ids)
+  id       = each.value
 }
 
-# -----------------------
-# SECURITY GROUP - ALB
-# -----------------------
-resource "aws_security_group" "alb_sg" {
-  name        = "video-uploader-service-alb-sg"
-  description = "Security group for ALB"
+locals {
+  eks_supported_zones = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f"]
+
+  # Filtrar subnets que estão nas zonas suportadas
+  filtered_subnets = [
+    for subnet_id in data.aws_subnets.all.ids :
+    subnet_id
+    if contains(local.eks_supported_zones, data.aws_subnet.details[subnet_id].availability_zone)
+  ]
+
+  # Usar apenas as primeiras 2-3 subnets
+  selected_subnets = slice(local.filtered_subnets, 0, min(3, length(local.filtered_subnets)))
+
+  common_tags = {
+    Project = var.app_name
+  }
+
+  cluster_name = var.cluster_name
+}
+
+# EKS Cluster usando role existente (LabRole)
+resource "aws_eks_cluster" "main" {
+  name     = local.cluster_name
+  role_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
+
+  vpc_config {
+    subnet_ids              = local.selected_subnets
+    endpoint_public_access  = true
+    endpoint_private_access = false
+    security_group_ids      = [aws_security_group.eks_cluster.id]
+  }
+
+  tags = local.common_tags
+}
+
+# Security Group para o Cluster EKS
+resource "aws_security_group" "eks_cluster" {
+  name        = "${var.cluster_name}-cluster-sg"
+  description = "Security group for EKS cluster"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
+    description = "Allow pods to communicate with each other"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  ingress {
+    description = "Allow worker nodes to communicate with cluster"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [data.aws_vpc.default.cidr_block]
   }
 
   egress {
@@ -56,214 +102,239 @@ resource "aws_security_group" "alb_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "video-uploader-service-alb-sg"
+  tags = local.common_tags
+}
+
+# EKS Node Group
+resource "aws_eks_node_group" "main" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "default-nodegroup"
+  node_role_arn   = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
+  subnet_ids      = local.selected_subnets
+
+  scaling_config {
+    desired_size = 1
+    max_size     = 2
+    min_size     = 1
+  }
+
+  instance_types = ["t3.medium"]
+  capacity_type  = "ON_DEMAND"
+
+  tags = local.common_tags
+
+  depends_on = [aws_eks_cluster.main]
+}
+
+# Data source para autenticação
+data "aws_eks_cluster_auth" "cluster_auth" {
+  name = aws_eks_cluster.main.name
+}
+
+provider "kubernetes" {
+  host                   = aws_eks_cluster.main.endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.main.certificate_authority[0].data)
+  token                  = data.aws_eks_cluster_auth.cluster_auth.token
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.main.name]
+    command     = "aws"
   }
 }
 
-# -----------------------
-# SECURITY GROUP - ECS
-# -----------------------
-resource "aws_security_group" "ecs_sg" {
-  name        = "video-uploader-service-ecs-sg"
-  description = "Security group for ECS tasks"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    from_port       = 8080
-    to_port         = 8080
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb_sg.id]
+# Kubernetes resources
+resource "kubernetes_namespace" "app" {
+  metadata {
+    name = var.app_name
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "video-uploader-service-ecs-sg"
-  }
+  depends_on = [aws_eks_node_group.main]
 }
 
-# -----------------------
-# ALB
-# -----------------------
-resource "aws_lb" "video_uploader_alb" {
-  name               = "video-uploader-service-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = slice(data.aws_subnets.all.ids, 0, min(2, length(data.aws_subnets.all.ids)))
-
-  enable_deletion_protection = false
-
-  tags = {
-    Name = "video-uploader-service-alb"
+# Secret com credenciais AWS
+resource "kubernetes_secret" "aws_credentials" {
+  metadata {
+    name      = "aws-credentials"
+    namespace = kubernetes_namespace.app.metadata[0].name
   }
+
+  data = {
+    AWS_ACCESS_KEY_ID     = var.aws_access_key_id
+    AWS_SECRET_ACCESS_KEY = var.aws_secret_access_key
+    AWS_SESSION_TOKEN     = var.aws_session_token
+  }
+
+  type = "Opaque"
+
+  depends_on = [kubernetes_namespace.app]
 }
 
-# -----------------------
-# TARGET GROUP
-# -----------------------
-resource "aws_lb_target_group" "video_uploader_tg" {
-  name        = "video-uploader-tg"
-  port        = 8080
-  protocol    = "HTTP"
-  vpc_id      = data.aws_vpc.default.id
-  target_type = "ip"
-
-  health_check {
-    path                = "/"
-    interval            = 60
-    timeout             = 30
-    healthy_threshold   = 2
-    unhealthy_threshold = 5
-    matcher             = "200-399"
+# ConfigMap com configurações da aplicação
+resource "kubernetes_config_map" "app_config" {
+  metadata {
+    name      = "${var.app_name}-config"
+    namespace = kubernetes_namespace.app.metadata[0].name
   }
 
-  tags = {
-    Name = "video-uploader-tg"
+  data = {
+    # AWS Configuration
+    AWS_S3_BUCKET      = var.aws_s3_bucket
+    AWS_SQS_QUEUE_URL  = var.aws_sqs_queue_url
+
+    # Application Settings
+    AWS_REGION           = var.aws_region
+    SERVER_PORT          = "8080"
+    LOG_LEVEL            = "INFO"
+
+    # Configurações do Spring Boot
+    SPRING_PROFILES_ACTIVE = "prod"
   }
+
+  depends_on = [kubernetes_namespace.app]
 }
 
-# -----------------------
-# LISTENER
-# -----------------------
-resource "aws_lb_listener" "video_uploader_listener" {
-  load_balancer_arn = aws_lb.video_uploader_alb.arn
-  port              = "80"
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.video_uploader_tg.arn
-  }
-}
-
-# -----------------------
-# ECS CLUSTER
-# -----------------------
-resource "aws_ecs_cluster" "video_uploader_cluster" {
-  name = "video-uploader-cluster"
-
-  setting {
-    name  = "containerInsights"
-    value = "disabled"
+resource "kubernetes_deployment" "app" {
+  metadata {
+    name      = var.app_name
+    namespace = kubernetes_namespace.app.metadata[0].name
   }
 
-  tags = {
-    Name = "video-uploader-cluster"
-  }
-}
+  spec {
+    replicas = 1
 
-# -----------------------
-# TASK DEFINITION
-# -----------------------
-resource "aws_ecs_task_definition" "video_uploader_task" {
-  family                   = "video-uploader-service"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = 512
-  memory                   = 1024
-  execution_role_arn       = data.aws_iam_role.lab_role.arn
-
-  container_definitions = jsonencode([
-    {
-      name  = "video-uploader-service"
-      image = "rodrigopatricio19/video-uploader-service:latest"
-
-      portMappings = [{
-        containerPort = 8080
-        hostPort      = 8080
-        protocol      = "tcp"
-      }]
-
-      essential = true
-
-      healthCheck = {
-        command     = ["CMD-SHELL", "wget -q -O - http://localhost:8080/ || exit 1"]
-        interval    = 60
-        timeout     = 20
-        retries     = 3
-        startPeriod = 120
+    selector {
+      match_labels = {
+        app = var.app_name
       }
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = "/ecs/video-uploader-service"
-          awslogs-region        = "us-east-1"
-          awslogs-stream-prefix = "ecs"
-        }
-      }
-
-      environment = [
-        {
-          name  = "SERVER_PORT"
-          value = "8080"
-        },
-        {
-          name  = "AWS_REGION"
-          value = "us-east-1"
-        },
-        {
-          name  = "AWS_S3_BUCKET"
-          value = "my-video-bucket"
-        },
-        {
-          name  = "AWS_SQS_QUEUE_URL"
-          value = "https://sqs.us-east-1.amazonaws.com/123456789012/video-queue"
-        }
-      ]
     }
-  ])
 
-  tags = {
-    Name = "video-uploader-service-task"
+    template {
+      metadata {
+        labels = {
+          app = var.app_name
+        }
+      }
+
+      spec {
+        container {
+          name  = var.app_name
+          image = "${var.docker_image}:${var.docker_image_tag}"
+
+          port {
+            container_port = var.container_port
+          }
+
+          # Configurações do ConfigMap
+          env_from {
+            config_map_ref {
+              name = kubernetes_config_map.app_config.metadata[0].name
+            }
+          }
+
+          # Credenciais AWS do Secret
+          env {
+            name = "AWS_ACCESS_KEY_ID"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.aws_credentials.metadata[0].name
+                key  = "AWS_ACCESS_KEY_ID"
+              }
+            }
+          }
+
+          env {
+            name = "AWS_SECRET_ACCESS_KEY"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.aws_credentials.metadata[0].name
+                key  = "AWS_SECRET_ACCESS_KEY"
+              }
+            }
+          }
+
+          env {
+            name = "AWS_SESSION_TOKEN"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.aws_credentials.metadata[0].name
+                key  = "AWS_SESSION_TOKEN"
+              }
+            }
+          }
+          env {
+            name  = "AWS_DEFAULT_REGION"
+            value = var.aws_region
+          }
+
+          env {
+            name  = "AWS_REGION"
+            value = var.aws_region
+          }
+          liveness_probe {
+            tcp_socket {
+              port = var.container_port
+            }
+            initial_delay_seconds = 60
+            period_seconds        = 10
+            timeout_seconds       = 5
+            failure_threshold     = 3
+          }
+
+          readiness_probe {
+            tcp_socket {
+              port = var.container_port
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 5
+            timeout_seconds       = 5
+            failure_threshold     = 3
+          }
+          # Resources
+          resources {
+            limits = {
+              cpu    = "500m"
+              memory = "1024Mi"
+            }
+            requests = {
+              cpu    = "250m"
+              memory = "512Mi"
+            }
+          }
+        }
+      }
+    }
   }
+
+  depends_on = [
+    kubernetes_config_map.app_config,
+    kubernetes_secret.aws_credentials
+  ]
 }
 
-# -----------------------
-# ECS SERVICE
-# -----------------------
-resource "aws_ecs_service" "video_uploader_service" {
-  name            = "video-uploader-service"
-  cluster         = aws_ecs_cluster.video_uploader_cluster.id
-  task_definition = aws_ecs_task_definition.video_uploader_task.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-
-  health_check_grace_period_seconds = 600
-
-  network_configuration {
-    security_groups  = [aws_security_group.ecs_sg.id]
-    subnets          = slice(data.aws_subnets.all.ids, 0, min(2, length(data.aws_subnets.all.ids)))
-    assign_public_ip = true
+# Service LoadBalancer
+resource "kubernetes_service" "app" {
+  metadata {
+    name      = var.app_name
+    namespace = kubernetes_namespace.app.metadata[0].name
+    annotations = {
+      "service.beta.kubernetes.io/aws-load-balancer-type" = "nlb"
+    }
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.video_uploader_tg.arn
-    container_name   = "video-uploader-service"
-    container_port   = 8080
+  spec {
+    selector = {
+      app = var.app_name
+    }
+
+    port {
+      port        = 80
+      target_port = var.container_port
+      protocol    = "TCP"
+    }
+
+    type = "LoadBalancer"
   }
 
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  tags = {
-    Name = "video-uploader-service"
-  }
-}
-
-# -----------------------
-# LOG GROUP
-# -----------------------
-resource "aws_cloudwatch_log_group" "video_uploader_service" {
-  name              = "/ecs/video-uploader-service"
-  retention_in_days = 7
+  depends_on = [kubernetes_deployment.app]
 }

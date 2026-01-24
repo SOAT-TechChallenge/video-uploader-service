@@ -1,24 +1,20 @@
-output "alb_dns_name" {
-  description = "DNS name of the ALB"
-  value       = aws_lb.video_uploader_alb.dns_name
+output "cluster_name" {
+  value = aws_eks_cluster.main.name
 }
 
-output "service_url" {
-  description = "URL para acessar o serviço"
-  value       = "http://${aws_lb.video_uploader_alb.dns_name}"
+output "selected_subnets" {
+  value = local.selected_subnets
 }
 
-output "ecs_cluster_name" {
-  description = "Name of the ECS cluster"
-  value       = aws_ecs_cluster.video_uploader_cluster.name
+output "load_balancer_url" {
+  value = "http://${kubernetes_service.app.status.0.load_balancer.0.ingress.0.hostname}"
+  depends_on = [kubernetes_service.app]
 }
 
-output "ecs_service_name" {
-  description = "Name of the ECS service"
-  value       = aws_ecs_service.video_uploader_service.name
+output "namespace" {
+  value = kubernetes_namespace.app.metadata[0].name
 }
 
-output "ecs_task_definition_family" {
-  description = "Task Definition family name"
-  value       = aws_ecs_task_definition.video_uploader_task.family
+output "service_name" {
+  value = kubernetes_service.app.metadata[0].name
 }
