@@ -56,18 +56,31 @@ locals {
   }
 
   cluster_name = var.cluster_name
+
+  # Porta que aberta nos Nodes para o ALB conversar com o K8s
+  node_port = 30007
 }
 
-# EKS Cluster usando role existente (LabRole)
-resource "aws_eks_cluster" "main" {
-  name     = local.cluster_name
-  role_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
+# --- 1. Security Groups (Atualizados para ALB) ---
 
-  vpc_config {
-    subnet_ids              = local.selected_subnets
-    endpoint_public_access  = true
-    endpoint_private_access = false
-    security_group_ids      = [aws_security_group.eks_cluster.id]
+resource "aws_security_group" "alb_sg" {
+  name        = "${var.app_name}-alb-sg"
+  description = "Security group for ALB - Allow HTTP"
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTP from world"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = local.common_tags
@@ -95,6 +108,15 @@ resource "aws_security_group" "eks_cluster" {
     cidr_blocks = [data.aws_vpc.default.cidr_block]
   }
 
+  # Permitir que o ALB fale com os Nodes na porta do NodePort
+  ingress {
+    description     = "Allow ALB to access NodePort"
+    from_port       = local.node_port
+    to_port         = local.node_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -105,7 +127,22 @@ resource "aws_security_group" "eks_cluster" {
   tags = local.common_tags
 }
 
-# EKS Node Group
+# --- 2. EKS Cluster & Nodes ---
+
+resource "aws_eks_cluster" "main" {
+  name     = local.cluster_name
+  role_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
+
+  vpc_config {
+    subnet_ids              = local.selected_subnets
+    endpoint_public_access  = true
+    endpoint_private_access = false
+    security_group_ids      = [aws_security_group.eks_cluster.id]
+  }
+
+  tags = local.common_tags
+}
+
 resource "aws_eks_node_group" "main" {
   cluster_name    = aws_eks_cluster.main.name
   node_group_name = "default-nodegroup"
@@ -126,7 +163,82 @@ resource "aws_eks_node_group" "main" {
   depends_on = [aws_eks_cluster.main]
 }
 
-# Data source para autenticação
+# --- 3. ALB MANUAL (Para aplicar a regra de Header) ---
+
+resource "aws_lb" "app_alb" {
+  name                       = "${var.app_name}-alb"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb_sg.id]
+  subnets                    = local.selected_subnets
+  enable_deletion_protection = false
+
+  tags = local.common_tags
+}
+
+resource "aws_lb_target_group" "app_tg" {
+  name     = "${var.app_name}-tg"
+  port     = local.node_port # Aponta para a porta exposta no Node
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path                = "/actuator/health"
+    port                = "traffic-port" # Usa a mesma porta do NodePort
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    matcher             = "200"
+  }
+}
+
+# Listener Padrão (Bloqueia tudo)
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.app_alb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Acesso Direto Negado."
+      status_code  = "403"
+    }
+  }
+}
+
+# Regra VIP (Libera com Header)
+resource "aws_lb_listener_rule" "allow_gateway" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 100
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "x-apigateway-token"
+      values           = ["tech-challenge-hackathon"]
+    }
+  }
+}
+
+# Conecta o Auto Scaling Group do EKS ao Target Group do ALB
+resource "aws_autoscaling_attachment" "eks_nodes_to_tg" {
+  # Pega o nome do ASG criado dinamicamente pelo EKS Node Group
+  autoscaling_group_name = aws_eks_node_group.main.resources[0].autoscaling_groups[0].name
+  lb_target_group_arn    = aws_lb_target_group.app_tg.arn
+  
+  depends_on = [aws_eks_node_group.main, aws_lb_target_group.app_tg]
+}
+
+# --- 4. Kubernetes Resources ---
+
 data "aws_eks_cluster_auth" "cluster_auth" {
   name = aws_eks_cluster.main.name
 }
@@ -143,16 +255,13 @@ provider "kubernetes" {
   }
 }
 
-# Kubernetes resources
 resource "kubernetes_namespace" "app" {
   metadata {
     name = var.app_name
   }
-
   depends_on = [aws_eks_node_group.main]
 }
 
-# Secret com credenciais AWS
 resource "kubernetes_secret" "aws_credentials" {
   metadata {
     name      = "aws-credentials"
@@ -166,11 +275,8 @@ resource "kubernetes_secret" "aws_credentials" {
   }
 
   type = "Opaque"
-
-  depends_on = [kubernetes_namespace.app]
 }
 
-# ConfigMap com configurações da aplicação
 resource "kubernetes_config_map" "app_config" {
   metadata {
     name      = "${var.app_name}-config"
@@ -178,20 +284,13 @@ resource "kubernetes_config_map" "app_config" {
   }
 
   data = {
-    # AWS Configuration
     AWS_S3_BUCKET      = var.aws_s3_bucket
     AWS_SQS_QUEUE_URL  = var.aws_sqs_queue_url
-
-    # Application Settings
-    AWS_REGION           = var.aws_region
-    SERVER_PORT          = "8080"
-    LOG_LEVEL            = "INFO"
-
-    # Configurações do Spring Boot
+    AWS_REGION         = var.aws_region
+    SERVER_PORT        = "8080"
+    LOG_LEVEL          = "INFO"
     SPRING_PROFILES_ACTIVE = "prod"
   }
-
-  depends_on = [kubernetes_namespace.app]
 }
 
 resource "kubernetes_deployment" "app" {
@@ -225,14 +324,12 @@ resource "kubernetes_deployment" "app" {
             container_port = var.container_port
           }
 
-          # Configurações do ConfigMap
           env_from {
             config_map_ref {
               name = kubernetes_config_map.app_config.metadata[0].name
             }
           }
 
-          # Credenciais AWS do Secret
           env {
             name = "AWS_ACCESS_KEY_ID"
             value_from {
@@ -262,6 +359,7 @@ resource "kubernetes_deployment" "app" {
               }
             }
           }
+
           env {
             name  = "AWS_DEFAULT_REGION"
             value = var.aws_region
@@ -271,6 +369,7 @@ resource "kubernetes_deployment" "app" {
             name  = "AWS_REGION"
             value = var.aws_region
           }
+
           liveness_probe {
             tcp_socket {
               port = var.container_port
@@ -290,7 +389,7 @@ resource "kubernetes_deployment" "app" {
             timeout_seconds       = 5
             failure_threshold     = 3
           }
-          # Resources
+
           resources {
             limits = {
               cpu    = "500m"
@@ -312,14 +411,11 @@ resource "kubernetes_deployment" "app" {
   ]
 }
 
-# Service LoadBalancer
+# --- Service Alterado: NodePort ---
 resource "kubernetes_service" "app" {
   metadata {
     name      = var.app_name
     namespace = kubernetes_namespace.app.metadata[0].name
-    annotations = {
-      "service.beta.kubernetes.io/aws-load-balancer-type" = "nlb"
-    }
   }
 
   spec {
@@ -327,13 +423,16 @@ resource "kubernetes_service" "app" {
       app = var.app_name
     }
 
+    # NodePort abre uma porta fixa nos Nodes
+    # para o ALB conseguir entregar o tráfego
+    type = "NodePort"
+
     port {
       port        = 80
       target_port = var.container_port
+      node_port   = local.node_port
       protocol    = "TCP"
     }
-
-    type = "LoadBalancer"
   }
 
   depends_on = [kubernetes_deployment.app]

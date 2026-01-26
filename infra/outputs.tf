@@ -6,9 +6,10 @@ output "selected_subnets" {
   value = local.selected_subnets
 }
 
+# --- CORREÇÃO AQUI ---
 output "load_balancer_url" {
-  value = "http://${kubernetes_service.app.status.0.load_balancer.0.ingress.0.hostname}"
-  depends_on = [kubernetes_service.app]
+  description = "URL pública do Application Load Balancer"
+  value       = "http://${aws_lb.app_alb.dns_name}"
 }
 
 output "namespace" {

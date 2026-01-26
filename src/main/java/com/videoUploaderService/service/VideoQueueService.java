@@ -26,11 +26,13 @@ public class VideoQueueService {
         this.objectMapper = objectMapper;
     }
 
-    public void sendVideoMessage(String s3Key, String s3Url, String title, String description) {
+    public void sendVideoMessage(String s3Key, String s3Url, String title, String description, String username, String email) {
         Map<String, Object> payload = new HashMap<>();
         payload.put("s3Key", s3Key);
         payload.put("s3Url", s3Url);
         payload.put("title", title);
+        payload.put("username", username);
+        payload.put("email", email);
         payload.put("description", description);
         payload.put("uploadedAt", Instant.now().toString());
 

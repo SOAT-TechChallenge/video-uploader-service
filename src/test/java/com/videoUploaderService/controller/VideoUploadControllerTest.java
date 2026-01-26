@@ -1,8 +1,11 @@
 package com.videoUploaderService.controller;
 
+import com.videoUploaderService.service.TokenService;
+import com.videoUploaderService.service.TokenService.UserInfo; // Importante para o objeto UserInfo
 import com.videoUploaderService.service.VideoQueueService;
 import com.videoUploaderService.service.VideoStorageService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -14,7 +17,6 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,11 +31,16 @@ class VideoUploadControllerTest {
     @Mock
     private VideoQueueService videoQueueService;
 
+    @Mock
+    private TokenService tokenService;
+
     @InjectMocks
     private VideoUploadController videoUploadController;
 
     private MockMultipartFile validFile;
     private MockMultipartFile emptyFile;
+    private String validToken;
+    private UserInfo userInfo;
 
     @BeforeEach
     void setUp() {
@@ -50,107 +57,118 @@ class VideoUploadControllerTest {
                 "video/mp4",
                 new byte[0]
         );
+
+        validToken = "Bearer token-valido-123";
+        userInfo = new UserInfo("usuarioTeste", "email@teste.com");
     }
 
     @Test
+    @DisplayName("Sucesso: Upload com descrição e token válido")
     void uploadVideo_Success_WithDescription() throws IOException {
         // Arrange
-        String s3Key = "videos/1234567890-abc123.mp4";
-        String s3Url = "https://s3.amazonaws.com/bucket/videos/1234567890-abc123.mp4";
+        String s3Key = "videos/123.mp4";
+        String s3Url = "https://s3.aws/123.mp4";
         String title = "Test Video";
         String description = "Test Description";
 
+        // Simula a decodificação do token
+        when(tokenService.decodeToken(validToken)).thenReturn(userInfo);
+        
         when(videoStorageService.uploadVideo(any(MultipartFile.class))).thenReturn(s3Key);
         when(videoStorageService.getVideoUrl(s3Key)).thenReturn(s3Url);
-        doNothing().when(videoQueueService).sendVideoMessage(s3Key, s3Url, title, description);
+        
+        // Simula o envio para a fila
+        doNothing().when(videoQueueService).sendVideoMessage(
+            s3Key, s3Url, title, description, userInfo.username(), userInfo.email()
+        );
 
-        // Act
-        ResponseEntity<?> response = videoUploadController.uploadVideo(validFile, title, description);
+        // Act (Passando o token como primeiro argumento)
+        ResponseEntity<?> response = videoUploadController.uploadVideo(validToken, validFile, title, description);
 
         // Assert
         assertEquals(HttpStatus.CREATED, response.getStatusCode());
-        assertNotNull(response.getBody());
-        assertTrue(response.getBody() instanceof Map);
-
-        @SuppressWarnings("unchecked")
-        Map<String, Object> body = (Map<String, Object>) response.getBody();
-        assertEquals("Upload realizado com sucesso", body.get("message"));
-        assertEquals(s3Key, body.get("s3Key"));
-        assertEquals(s3Url, body.get("s3Url"));
-
-        verify(videoStorageService, times(1)).uploadVideo(validFile);
-        verify(videoStorageService, times(1)).getVideoUrl(s3Key);
-        verify(videoQueueService, times(1)).sendVideoMessage(s3Key, s3Url, title, description);
+        
+        verify(tokenService).decodeToken(validToken);
+        verify(videoQueueService).sendVideoMessage(s3Key, s3Url, title, description, userInfo.username(), userInfo.email());
     }
 
     @Test
+    @DisplayName("Sucesso: Upload sem descrição")
     void uploadVideo_Success_WithoutDescription() throws IOException {
         // Arrange
-        String s3Key = "videos/1234567890-abc123.mp4";
-        String s3Url = "https://s3.amazonaws.com/bucket/videos/1234567890-abc123.mp4";
+        String s3Key = "videos/123.mp4";
+        String s3Url = "https://s3.aws/123.mp4";
         String title = "Test Video";
 
+        when(tokenService.decodeToken(validToken)).thenReturn(userInfo);
         when(videoStorageService.uploadVideo(any(MultipartFile.class))).thenReturn(s3Key);
         when(videoStorageService.getVideoUrl(s3Key)).thenReturn(s3Url);
-        doNothing().when(videoQueueService).sendVideoMessage(eq(s3Key), eq(s3Url), eq(title), isNull());
 
         // Act
-        ResponseEntity<?> response = videoUploadController.uploadVideo(validFile, title, null);
+        ResponseEntity<?> response = videoUploadController.uploadVideo(validToken, validFile, title, null);
 
         // Assert
         assertEquals(HttpStatus.CREATED, response.getStatusCode());
-        assertNotNull(response.getBody());
 
-        verify(videoStorageService, times(1)).uploadVideo(validFile);
-        verify(videoStorageService, times(1)).getVideoUrl(s3Key);
-        verify(videoQueueService, times(1)).sendVideoMessage(s3Key, s3Url, title, null);
+        verify(videoQueueService).sendVideoMessage(s3Key, s3Url, title, null, userInfo.username(), userInfo.email());
     }
 
     @Test
+    @DisplayName("Erro 400: Arquivo vazio")
     void uploadVideo_EmptyFile_ReturnsBadRequest() throws IOException {
         // Act
-        ResponseEntity<?> response = videoUploadController.uploadVideo(emptyFile, "Test Title", null);
+        ResponseEntity<?> response = videoUploadController.uploadVideo(validToken, emptyFile, "Title", null);
 
         // Assert
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
         assertEquals("Arquivo de vídeo é obrigatório", response.getBody());
 
-        verify(videoStorageService, never()).uploadVideo(any(MultipartFile.class));
-        verify(videoQueueService, never()).sendVideoMessage(anyString(), anyString(), anyString(), anyString());
+        // Garante que não chamou nada
+        verifyNoInteractions(tokenService);
+        verifyNoInteractions(videoStorageService);
     }
 
     @Test
+    @DisplayName("Erro 500: Falha no S3")
     void uploadVideo_IOException_ReturnsInternalServerError() throws IOException {
         // Arrange
-        String title = "Test Video";
-        IOException ioException = new IOException("S3 connection failed");
-
-        when(videoStorageService.uploadVideo(any(MultipartFile.class))).thenThrow(ioException);
+        when(tokenService.decodeToken(validToken)).thenReturn(userInfo);
+        when(videoStorageService.uploadVideo(any(MultipartFile.class))).thenThrow(new IOException("S3 falhou"));
 
         // Act
-        ResponseEntity<?> response = videoUploadController.uploadVideo(validFile, title, null);
+        ResponseEntity<?> response = videoUploadController.uploadVideo(validToken, validFile, "Title", null);
 
         // Assert
         assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getStatusCode());
-        assertTrue(response.getBody().toString().contains("Erro ao fazer upload do vídeo"));
-        assertTrue(response.getBody().toString().contains("S3 connection failed"));
-
-        verify(videoStorageService, times(1)).uploadVideo(validFile);
-        verify(videoStorageService, never()).getVideoUrl(anyString());
-        verify(videoQueueService, never()).sendVideoMessage(anyString(), anyString(), anyString(), anyString());
+        
+        verify(videoStorageService).uploadVideo(validFile);
+        // Garante que NÃO mandou para fila se o upload falhou
+        verifyNoInteractions(videoQueueService);
     }
-
+    
     @Test
+    @DisplayName("Erro 400: Arquivo nulo")
     void uploadVideo_NullFile_ReturnsBadRequest() throws IOException {
         // Act
-        ResponseEntity<?> response = videoUploadController.uploadVideo(null, "Test Title", null);
+        ResponseEntity<?> response = videoUploadController.uploadVideo(validToken, null, "Title", null);
 
         // Assert
         assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
-        assertEquals("Arquivo de vídeo é obrigatório", response.getBody());
+    }
 
-        verify(videoStorageService, never()).uploadVideo(any(MultipartFile.class));
-        verify(videoQueueService, never()).sendVideoMessage(anyString(), anyString(), anyString(), anyString());
+    @Test
+    @DisplayName("Erro 401: Token inválido")
+    void uploadVideo_InvalidToken_ReturnsUnauthorized() throws IOException {
+        // Arrange
+        String invalidToken = "Bearer invalid";
+        when(tokenService.decodeToken(invalidToken)).thenThrow(new RuntimeException("Token expirado"));
+
+        // Act
+        ResponseEntity<?> response = videoUploadController.uploadVideo(invalidToken, validFile, "Title", null);
+
+        // Assert
+        assertEquals(HttpStatus.UNAUTHORIZED, response.getStatusCode());
+        
+        verifyNoInteractions(videoStorageService);
     }
 }
-

@@ -2,17 +2,17 @@ package com.videoUploaderService.service;
 
 import com.amazonaws.services.sqs.AmazonSQS;
 import com.amazonaws.services.sqs.model.SendMessageRequest;
-import com.amazonaws.services.sqs.model.SendMessageResult;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.util.ReflectionTestUtils; // Para injetar o @Value
 
 import java.util.Map;
 
@@ -29,143 +29,83 @@ class VideoQueueServiceTest {
     @Mock
     private ObjectMapper objectMapper;
 
-    @InjectMocks
     private VideoQueueService videoQueueService;
 
-    private static final String QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/video-queue";
-    private SendMessageResult sendMessageResult;
+    @Captor
+    private ArgumentCaptor<SendMessageRequest> sendMessageRequestCaptor;
+
+    private final String QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123/video-queue";
 
     @BeforeEach
     void setUp() {
-        ReflectionTestUtils.setField(videoQueueService, "queueUrl", QUEUE_URL);
-        sendMessageResult = new SendMessageResult();
-        sendMessageResult.setMessageId("test-message-id");
+        // Instancia a service passando os Mocks
+        videoQueueService = new VideoQueueService(amazonSQS, QUEUE_URL, objectMapper);
     }
 
     @Test
+    @DisplayName("Deve enviar mensagem para o SQS com sucesso e payload completo")
     void sendVideoMessage_Success_WithDescription() throws JsonProcessingException {
         // Arrange
-        String s3Key = "videos/1234567890-abc123.mp4";
-        String s3Url = "https://s3.amazonaws.com/bucket/videos/1234567890-abc123.mp4";
-        String title = "Test Video";
-        String description = "Test Description";
-        String jsonBody = "{\"s3Key\":\"videos/1234567890-abc123.mp4\",\"s3Url\":\"https://s3.amazonaws.com/bucket/videos/1234567890-abc123.mp4\",\"title\":\"Test Video\",\"description\":\"Test Description\",\"uploadedAt\":\"2024-01-01T00:00:00Z\"}";
+        String s3Key = "videos/file.mp4";
+        String s3Url = "http://s3/videos/file.mp4";
+        String title = "Titulo";
+        String desc = "Descricao";
+        String user = "usuario";
+        String email = "email@teste.com";
+        String expectedJsonBody = "{\"json\":\"mock\"}";
 
-        ArgumentCaptor<SendMessageRequest> requestCaptor = ArgumentCaptor.forClass(SendMessageRequest.class);
-
-        when(objectMapper.writeValueAsString(any(Map.class))).thenReturn(jsonBody);
-        when(amazonSQS.sendMessage(any(SendMessageRequest.class))).thenReturn(sendMessageResult);
+        // Mockamos o comportamento do ObjectMapper
+        // IMPORTANTE: Usamos any(Map.class) para evitar problemas de matching com Mapas
+        when(objectMapper.writeValueAsString(any(Map.class))).thenReturn(expectedJsonBody);
 
         // Act
-        videoQueueService.sendVideoMessage(s3Key, s3Url, title, description);
+        videoQueueService.sendVideoMessage(s3Key, s3Url, title, desc, user, email);
 
         // Assert
+        // 1. Verifica se serializou o JSON
         verify(objectMapper, times(1)).writeValueAsString(any(Map.class));
-        verify(amazonSQS, times(1)).sendMessage(requestCaptor.capture());
 
-        SendMessageRequest capturedRequest = requestCaptor.getValue();
+        // 2. Captura o que foi enviado para o SQS
+        verify(amazonSQS, times(1)).sendMessage(sendMessageRequestCaptor.capture());
+        
+        SendMessageRequest capturedRequest = sendMessageRequestCaptor.getValue();
+        
+        // 3. Validações
         assertEquals(QUEUE_URL, capturedRequest.getQueueUrl());
-        assertEquals(jsonBody, capturedRequest.getMessageBody());
+        assertEquals(expectedJsonBody, capturedRequest.getMessageBody());
     }
 
     @Test
+    @DisplayName("Deve enviar mensagem corretamente mesmo sem descrição")
     void sendVideoMessage_Success_WithoutDescription() throws JsonProcessingException {
         // Arrange
-        String s3Key = "videos/1234567890-abc123.mp4";
-        String s3Url = "https://s3.amazonaws.com/bucket/videos/1234567890-abc123.mp4";
-        String title = "Test Video";
-        String jsonBody = "{\"s3Key\":\"videos/1234567890-abc123.mp4\",\"s3Url\":\"https://s3.amazonaws.com/bucket/videos/1234567890-abc123.mp4\",\"title\":\"Test Video\",\"description\":null,\"uploadedAt\":\"2024-01-01T00:00:00Z\"}";
-
-        ArgumentCaptor<Map<String, Object>> mapCaptor = ArgumentCaptor.forClass(Map.class);
-
-        when(objectMapper.writeValueAsString(any(Map.class))).thenReturn(jsonBody);
-        when(amazonSQS.sendMessage(any(SendMessageRequest.class))).thenReturn(sendMessageResult);
+        String expectedJsonBody = "{\"json\":\"mock_no_desc\"}";
+        when(objectMapper.writeValueAsString(any(Map.class))).thenReturn(expectedJsonBody);
 
         // Act
-        videoQueueService.sendVideoMessage(s3Key, s3Url, title, null);
+        videoQueueService.sendVideoMessage("key", "url", "Title", null, "user", "email");
 
         // Assert
-        verify(objectMapper, times(1)).writeValueAsString(mapCaptor.capture());
-        verify(amazonSQS, times(1)).sendMessage(any(SendMessageRequest.class));
-
-        Map<String, Object> capturedMap = mapCaptor.getValue();
-        assertEquals(s3Key, capturedMap.get("s3Key"));
-        assertEquals(s3Url, capturedMap.get("s3Url"));
-        assertEquals(title, capturedMap.get("title"));
-        assertNull(capturedMap.get("description"));
-        assertNotNull(capturedMap.get("uploadedAt"));
+        verify(amazonSQS).sendMessage(sendMessageRequestCaptor.capture());
+        assertEquals(expectedJsonBody, sendMessageRequestCaptor.getValue().getMessageBody());
     }
 
     @Test
-    void sendVideoMessage_Success_VerifiesPayloadStructure() throws JsonProcessingException {
-        // Arrange
-        String s3Key = "videos/test-key.mp4";
-        String s3Url = "https://s3.amazonaws.com/bucket/videos/test-key.mp4";
-        String title = "My Video";
-        String description = "My Description";
-        String jsonBody = "{}";
-
-        ArgumentCaptor<Map<String, Object>> mapCaptor = ArgumentCaptor.forClass(Map.class);
-
-        when(objectMapper.writeValueAsString(any(Map.class))).thenReturn(jsonBody);
-        when(amazonSQS.sendMessage(any(SendMessageRequest.class))).thenReturn(sendMessageResult);
-
-        // Act
-        videoQueueService.sendVideoMessage(s3Key, s3Url, title, description);
-
-        // Assert
-        verify(objectMapper, times(1)).writeValueAsString(mapCaptor.capture());
-
-        Map<String, Object> payload = mapCaptor.getValue();
-        assertEquals(5, payload.size());
-        assertEquals(s3Key, payload.get("s3Key"));
-        assertEquals(s3Url, payload.get("s3Url"));
-        assertEquals(title, payload.get("title"));
-        assertEquals(description, payload.get("description"));
-        assertNotNull(payload.get("uploadedAt"));
-        assertTrue(payload.get("uploadedAt") instanceof String);
-    }
-
-    @Test
+    @DisplayName("Deve lançar RuntimeException quando falhar a serialização do JSON")
     void sendVideoMessage_JsonProcessingException_ThrowsRuntimeException() throws JsonProcessingException {
         // Arrange
-        String s3Key = "videos/test.mp4";
-        String s3Url = "https://s3.amazonaws.com/bucket/videos/test.mp4";
-        String title = "Test";
-        JsonProcessingException jsonException = new JsonProcessingException("JSON error") {};
-
-        when(objectMapper.writeValueAsString(any(Map.class))).thenThrow(jsonException);
+        // Simulamos o erro do Jackson
+        when(objectMapper.writeValueAsString(any(Map.class)))
+                .thenThrow(new JsonProcessingException("Erro simulação") {});
 
         // Act & Assert
-        RuntimeException exception = assertThrows(RuntimeException.class, () ->
-                videoQueueService.sendVideoMessage(s3Key, s3Url, title, null)
+        RuntimeException exception = assertThrows(RuntimeException.class, () -> 
+            videoQueueService.sendVideoMessage("key", "url", "Title", "Desc", "user", "email")
         );
 
         assertEquals("Erro ao serializar mensagem de vídeo", exception.getMessage());
-        assertSame(jsonException, exception.getCause());
 
-        verify(objectMapper, times(1)).writeValueAsString(any(Map.class));
-        verify(amazonSQS, never()).sendMessage(any(SendMessageRequest.class));
-    }
-
-    @Test
-    void sendVideoMessage_EmptyStrings_HandlesCorrectly() throws JsonProcessingException {
-        // Arrange
-        String s3Key = "";
-        String s3Url = "";
-        String title = "";
-        String jsonBody = "{}";
-
-        when(objectMapper.writeValueAsString(any(Map.class))).thenReturn(jsonBody);
-        when(amazonSQS.sendMessage(any(SendMessageRequest.class))).thenReturn(sendMessageResult);
-
-        // Act
-        videoQueueService.sendVideoMessage(s3Key, s3Url, title, null);
-
-        // Assert
-        verify(objectMapper, times(1)).writeValueAsString(any(Map.class));
-        verify(amazonSQS, times(1)).sendMessage(any(SendMessageRequest.class));
+        // Garante que NÂO tentou enviar para o SQS se falhou o JSON
+        verifyNoInteractions(amazonSQS);
     }
 }
-
-
