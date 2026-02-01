@@ -19,12 +19,10 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
-# Data source para a VPC default
 data "aws_vpc" "default" {
   default = true
 }
 
-# Listar todas as subnets da VPC default
 data "aws_subnets" "all" {
   filter {
     name   = "vpc-id"
@@ -32,36 +30,36 @@ data "aws_subnets" "all" {
   }
 }
 
-# Data source para obter detalhes de cada subnet
 data "aws_subnet" "details" {
   for_each = toset(data.aws_subnets.all.ids)
   id       = each.value
 }
 
 locals {
-  eks_supported_zones = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f"]
+  cluster_name = var.cluster_name
+  node_port    = 30007
+  
+  common_tags = {
+    Project = var.app_name
+  }
 
-  # Filtrar subnets que estão nas zonas suportadas
+  public_subnets_ids = [
+    for s in data.aws_subnet.details : s.id
+    if s.map_public_ip_on_launch == true
+  ]
+
+  eks_supported_zones = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1f"]
+  
   filtered_subnets = [
     for subnet_id in data.aws_subnets.all.ids :
     subnet_id
     if contains(local.eks_supported_zones, data.aws_subnet.details[subnet_id].availability_zone)
   ]
 
-  # Usar apenas as primeiras 2-3 subnets
-  selected_subnets = slice(local.filtered_subnets, 0, min(3, length(local.filtered_subnets)))
-
-  common_tags = {
-    Project = var.app_name
-  }
-
-  cluster_name = var.cluster_name
-
-  # Porta que aberta nos Nodes para o ALB conversar com o K8s
-  node_port = 30007
+  selected_subnets = length(local.public_subnets_ids) > 0 ? slice(local.public_subnets_ids, 0, min(2, length(local.public_subnets_ids))) : slice(local.filtered_subnets, 0, min(2, length(local.filtered_subnets)))
 }
 
-# --- 1. Security Groups (Atualizados para ALB) ---
+# --- 1. Security Groups ---
 
 resource "aws_security_group" "alb_sg" {
   name        = "${var.app_name}-alb-sg"
@@ -86,7 +84,6 @@ resource "aws_security_group" "alb_sg" {
   tags = local.common_tags
 }
 
-# Security Group para o Cluster EKS
 resource "aws_security_group" "eks_cluster" {
   name        = "${var.cluster_name}-cluster-sg"
   description = "Security group for EKS cluster"
@@ -108,7 +105,6 @@ resource "aws_security_group" "eks_cluster" {
     cidr_blocks = [data.aws_vpc.default.cidr_block]
   }
 
-  # Permitir que o ALB fale com os Nodes na porta do NodePort
   ingress {
     description     = "Allow ALB to access NodePort"
     from_port       = local.node_port
@@ -136,8 +132,20 @@ resource "aws_eks_cluster" "main" {
   vpc_config {
     subnet_ids              = local.selected_subnets
     endpoint_public_access  = true
-    endpoint_private_access = false
+    endpoint_private_access = true
     security_group_ids      = [aws_security_group.eks_cluster.id]
+  }
+
+  bootstrap_self_managed_addons = false
+
+  lifecycle {
+    ignore_changes = [
+      vpc_config,
+      tags,
+      tags_all,
+      role_arn,
+      version
+    ]
   }
 
   tags = local.common_tags
@@ -148,6 +156,16 @@ resource "aws_eks_node_group" "main" {
   node_group_name = "default-nodegroup"
   node_role_arn   = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole"
   subnet_ids      = local.selected_subnets
+
+  lifecycle {
+    ignore_changes = [
+      scaling_config,
+      subnet_ids,
+      instance_types,
+      tags,
+      tags_all
+    ]
+  }
 
   scaling_config {
     desired_size = 1
@@ -163,7 +181,7 @@ resource "aws_eks_node_group" "main" {
   depends_on = [aws_eks_cluster.main]
 }
 
-# --- 3. ALB MANUAL (Para aplicar a regra de Header) ---
+# --- 3. ALB ---
 
 resource "aws_lb" "app_alb" {
   name                       = "${var.app_name}-alb"
@@ -178,13 +196,13 @@ resource "aws_lb" "app_alb" {
 
 resource "aws_lb_target_group" "app_tg" {
   name     = "${var.app_name}-tg"
-  port     = local.node_port # Aponta para a porta exposta no Node
+  port     = local.node_port
   protocol = "HTTP"
   vpc_id   = data.aws_vpc.default.id
 
   health_check {
     path                = "/actuator/health"
-    port                = "traffic-port" # Usa a mesma porta do NodePort
+    port                = "traffic-port"
     interval            = 30
     timeout             = 5
     healthy_threshold   = 2
@@ -193,7 +211,6 @@ resource "aws_lb_target_group" "app_tg" {
   }
 }
 
-# Listener Padrão (Bloqueia tudo)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.app_alb.arn
   port              = "80"
@@ -201,7 +218,6 @@ resource "aws_lb_listener" "http" {
 
   default_action {
     type = "fixed-response"
-
     fixed_response {
       content_type = "text/plain"
       message_body = "Acesso Direto Negado."
@@ -210,7 +226,6 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# Regra VIP (Libera com Header)
 resource "aws_lb_listener_rule" "allow_gateway" {
   listener_arn = aws_lb_listener.http.arn
   priority     = 100
@@ -228,9 +243,7 @@ resource "aws_lb_listener_rule" "allow_gateway" {
   }
 }
 
-# Conecta o Auto Scaling Group do EKS ao Target Group do ALB
 resource "aws_autoscaling_attachment" "eks_nodes_to_tg" {
-  # Pega o nome do ASG criado dinamicamente pelo EKS Node Group
   autoscaling_group_name = aws_eks_node_group.main.resources[0].autoscaling_groups[0].name
   lb_target_group_arn    = aws_lb_target_group.app_tg.arn
   
@@ -272,6 +285,7 @@ resource "kubernetes_secret" "aws_credentials" {
     AWS_ACCESS_KEY_ID     = var.aws_access_key_id
     AWS_SECRET_ACCESS_KEY = var.aws_secret_access_key
     AWS_SESSION_TOKEN     = var.aws_session_token
+    JWT_SECRET            = var.jwt_secret
   }
 
   type = "Opaque"
@@ -284,11 +298,11 @@ resource "kubernetes_config_map" "app_config" {
   }
 
   data = {
-    AWS_S3_BUCKET      = var.aws_s3_bucket
-    AWS_SQS_QUEUE_URL  = var.aws_sqs_queue_url
-    AWS_REGION         = var.aws_region
-    SERVER_PORT        = "8080"
-    LOG_LEVEL          = "INFO"
+    AWS_S3_BUCKET          = var.aws_s3_bucket
+    AWS_SQS_QUEUE_URL      = var.aws_sqs_queue_url
+    AWS_REGION             = var.aws_region
+    SERVER_PORT            = "8080"
+    LOG_LEVEL              = "INFO"
     SPRING_PROFILES_ACTIVE = "prod"
   }
 }
@@ -370,6 +384,26 @@ resource "kubernetes_deployment" "app" {
             value = var.aws_region
           }
 
+          env {
+            name = "JWT_SECRET"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret.aws_credentials.metadata[0].name
+                key  = "JWT_SECRET"
+              }
+            }
+          }
+
+          env {
+            name  = "SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE"
+            value = "500MB"
+          }
+
+          env {
+            name  = "SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE"
+            value = "500MB"
+          }
+
           liveness_probe {
             tcp_socket {
               port = var.container_port
@@ -411,7 +445,6 @@ resource "kubernetes_deployment" "app" {
   ]
 }
 
-# --- Service Alterado: NodePort ---
 resource "kubernetes_service" "app" {
   metadata {
     name      = var.app_name
@@ -423,8 +456,6 @@ resource "kubernetes_service" "app" {
       app = var.app_name
     }
 
-    # NodePort abre uma porta fixa nos Nodes
-    # para o ALB conseguir entregar o tráfego
     type = "NodePort"
 
     port {
