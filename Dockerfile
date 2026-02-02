@@ -1,18 +1,20 @@
-FROM maven:3.9.9-eclipse-temurin-17 AS build
+FROM maven:3.9.6-eclipse-temurin-17-alpine AS build
+
 WORKDIR /app
 
-COPY pom.xml ./
+COPY pom.xml .
 COPY src ./src
+RUN mvn clean package -DskipTests
 
-RUN ./mvnw -q -DskipTests package || mvn -q -DskipTests package
+FROM eclipse-temurin:17-jdk-alpine
 
-FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
 COPY --from=build /app/target/*.jar app.jar
 
 EXPOSE 8080
+EXPOSE 5005
 
-ENTRYPOINT ["java","-jar","/app/app.jar"]
+ENV JAVA_OPTS="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
 
-
+CMD ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
