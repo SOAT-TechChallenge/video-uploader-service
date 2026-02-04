@@ -216,9 +216,14 @@ resource "aws_ecs_task_definition" "uploader_task" {
       { name = "AWS_S3_BUCKET", value = aws_s3_bucket.video_bucket.bucket },
       { name = "AWS_SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.url },
 
-      { name = "AWS_ACCESS_KEY_ID", value = var.aws_access_key_id },
-      { name = "AWS_SECRET_ACCESS_KEY", value = var.aws_secret_access_key },
-      { name = "AWS_SESSION_TOKEN", value = var.aws_session_token },
+      # Credenciais explícitas removidas - a aplicação usará IAM roles (LabRole)
+      # Se precisar usar credenciais explícitas, descomente as linhas abaixo:
+      # { name = "AWS_ACCESS_KEY_ID", value = var.aws_access_key_id },
+      # { name = "AWS_SECRET_ACCESS_KEY", value = var.aws_secret_access_key },
+      # { name = "AWS_SESSION_TOKEN", value = var.aws_session_token },
+
+      # Token do API Gateway (deve corresponder ao configurado no ALB)
+      { name = "GATEWAY_TOKEN", value = "tech-challenge-hackathon" },
 
       { name = "SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE", value = "500MB" },
       { name = "SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE", value = "500MB" }
