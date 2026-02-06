@@ -2,26 +2,58 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
-jobs:
-  terraform:
-    name: 'Terraform Plan and Apply'
-    runs-on: ubuntu-latest
+env:
+  AWS_REGION: "us-east-1"
+  ECR_REPOSITORY_NAME: "video-uploader-repo"
+  ECS_CLUSTER_NAME: "video-uploader-cluster"
+  ECS_SERVICE_NAME: "video-uploader-service"
 
+jobs:
+  # --- 1. QUALIDADE (Java) ---
+  java-ci:
+    name: 'Java Build & Quality Check'
+    runs-on: ubuntu-latest
     steps:
-      - name: 'Checkout GitHub Repository'
-        uses: actions/checkout@v2
-    
-      - name: 'Setup Terraform'
-        uses: hashicorp/setup-terraform@v2
+      - name: 'Checkout Repository'
+        uses: actions/checkout@v4
+
+      - name: 'Setup Java 17'
+        uses: actions/setup-java@v4
         with:
-          terraform_version: 1.9.6 
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: 'Build and Verify Coverage'
+        run: mvn verify
+
+      - name: 'Publish Coverage to PR'
+        if: github.event_name == 'pull_request'
+        uses: madrapps/jacoco-report@v1.6.1
+        with:
+          paths: target/site/jacoco/jacoco.xml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          min-coverage-overall: 80 
+          title: 'Coverage Report'
+          update-comment: true
+
+  # --- 2. TERRAFORM PLAN (Sempre roda) ---
+  terraform-plan:
+    name: 'Terraform Plan'
+    needs: java-ci
+    runs-on: ubuntu-latest
+    environment: secrets
+    defaults:
+      run:
+        working-directory: ./infra
+    steps:
+      - name: 'Checkout Repository'
+        uses: actions/checkout@v4
 
       - name: 'Configure AWS Credentials'
         uses: aws-actions/configure-aws-credentials@v1
@@ -29,14 +61,107 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1 
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v2
 
       - name: 'Terraform Init'
         run: terraform init
 
       - name: 'Terraform Plan'
-        run: terraform plan
+        run: |
+          terraform plan \
+            -var="aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            -var="aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            -var="aws_session_token=${{ secrets.AWS_SESSION_TOKEN }}" \
+            -var="jwt_secret=${{ secrets.JWT_SECRET }}"
+
+  # --- 3. TERRAFORM APPLY (Apenas Merge/Push na Main) ---
+  terraform-apply:
+    name: 'Terraform Apply'
+    needs: terraform-plan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: secrets
+    defaults:
+      run:
+        working-directory: ./infra
+    steps:
+      - name: 'Checkout Repository'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v2
+
+      - name: 'Terraform Init'
+        run: terraform init
 
       - name: 'Terraform Apply'
-        if: github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve
+        run: |
+          terraform apply -auto-approve \
+            -var="aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            -var="aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            -var="aws_session_token=${{ secrets.AWS_SESSION_TOKEN }}" \
+            -var="jwt_secret=${{ secrets.JWT_SECRET }}"
+
+  # --- 4. DEPLOY (Apenas Merge/Push na Main) ---
+  deploy:
+    name: 'Build Docker & Deploy to ECS'
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+    environment: secrets 
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    steps:
+      - name: 'Checkout GitHub Repository'
+        uses: actions/checkout@v4
+    
+      - name: 'Setup Java 17'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: 'Build JAR for Docker'
+        run: mvn package -DskipTests
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 'Login to Amazon ECR'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: 'Build, Tag, and Push Image'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}:latest .
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}:latest
+
+      - name: 'Update ECS Service'
+        run: |
+          aws ecs update-service --cluster ${{ env.ECS_CLUSTER_NAME }} --service ${{ env.ECS_SERVICE_NAME }} --force-new-deployment
+      
+      - name: 'Show ALB URL'
+        run: |
+          ALB_URL=$(aws elbv2 describe-load-balancers --names "${{ env.ECS_SERVICE_NAME }}-alb" --query "LoadBalancers[0].DNSName" --output text)
+          echo "::notice title=Link de Acesso::http://$ALB_URL"

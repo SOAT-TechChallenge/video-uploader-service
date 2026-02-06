@@ -9,7 +9,7 @@ variable "app_name" {
 }
 
 variable "cluster_name" {
-  description = "Nome do cluster EKS"
+  description = "Nome do cluster ECS"
   default     = "video-uploader-cluster"
 }
 
@@ -18,51 +18,27 @@ variable "container_port" {
   default     = 8080
 }
 
-variable "docker_image" {
-  description = "Imagem Docker"
-  default     = "leynerbueno/video-uploader-service"
-}
-
-variable "docker_image_tag" {
-  description = "Tag da imagem"
-  default     = "latest"
-}
 
 variable "aws_access_key_id" {
   description = "AWS Access Key ID"
   type        = string
   sensitive   = true
-  default     = ""
 }
 
 variable "aws_secret_access_key" {
   description = "AWS Secret Access Key"
   type        = string
   sensitive   = true
-  default     = ""
 }
 
 variable "aws_session_token" {
   description = "AWS Session Token"
   type        = string
   sensitive   = true
-  default     = ""
-    }
-
-variable "aws_s3_bucket" {
-  description = "Nome do bucket S3 para vídeos"
-  type        = string
-  default     = "challenge-hackathon"
-}
-
-variable "aws_sqs_queue_url" {
-  description = "URL da fila SQS"
-  type        = string
-  default     = "https://sqs.us-east-1.amazonaws.com/294277043425/challenge-hackathon"
 }
 
 variable "jwt_secret" {
   description = "Secret key para assinatura de tokens JWT"
   type        = string
-  default     = "techChallenge"
+  sensitive   = true
 }
