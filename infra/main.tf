@@ -172,3 +172,9 @@ resource "aws_ecs_service" "uploader_service" {
 
   depends_on = [aws_lb_listener_rule.allow_gateway]
 }
+
+resource "aws_ssm_parameter" "video_bucket_name" {
+  name  = "/video-uploader/s3_bucket_name"
+  type  = "String"
+  value = aws_s3_bucket.video_bucket.bucket
+}
