@@ -178,3 +178,19 @@ resource "aws_ssm_parameter" "video_bucket_name" {
   type  = "String"
   value = aws_s3_bucket.video_bucket.bucket
 }
+
+resource "aws_ssm_parameter" "uploader_alb_dns" {
+  name        = "/video-uploader/alb_dns_name"
+  description = "DNS do Load Balancer do Video Uploader para o API Gateway"
+  type        = "String"
+  value       = aws_lb.uploader_alb.dns_name
+  overwrite   = true
+}
+
+resource "aws_ssm_parameter" "sqs_queue_url" {
+  name        = "/video-uploader/sqs_queue_url"
+  description = "URL da fila SQS para processamento de vídeos"
+  type        = "String"
+  value       = aws_sqs_queue.video_queue.url
+  overwrite   = true
+}
